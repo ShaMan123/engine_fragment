@@ -3,7 +3,8 @@
 /* eslint-disable no-cond-assign */
 /* eslint-disable no-bitwise */
 
-import { IfcDecoderStream } from "../ifc-stream";
+import { IfcDecoderStream } from "../ifc-stream/ifc-decoder";
+import { extractLineMeta } from "../ifc-stream/ifc-parser";
 
 // ---------------------------------------------------------------------------
 // Exported interfaces
@@ -196,31 +197,6 @@ const shouldRewriteType = (type: string): boolean => {
 // ---------------------------------------------------------------------------
 // Parse helpers — manual charCode-based extractors for speed on 37M+ lines
 // ---------------------------------------------------------------------------
-function extractId(raw: string): ExtractIdResult | null {
-  if (raw.charCodeAt(0) !== 35) return null; // '#'
-  let id = 0;
-  let i = 1;
-  while (i < raw.length) {
-    const c = raw.charCodeAt(i);
-    if (c >= 48 && c <= 57) {
-      id = id * 10 + (c - 48);
-      i++;
-    } else break;
-  }
-  if (id === 0) return null;
-  while (i < raw.length && raw.charCodeAt(i) <= 32) i++;
-  if (raw.charCodeAt(i) !== 61) return null; // '='
-  i++;
-  while (i < raw.length && raw.charCodeAt(i) <= 32) i++;
-  const ts = i;
-  while (i < raw.length) {
-    const c = raw.charCodeAt(i);
-    if ((c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 95) i++;
-    else break;
-  }
-  if (i === ts) return null;
-  return { id, type: raw.substring(ts, i) };
-}
 
 function extractRefs(raw: string, skipId?: number): number[] {
   const refs: number[] = [];
@@ -1135,7 +1111,7 @@ export class IfcSplitter {
         const trimmed = line.trim();
         if (trimmed === "ENDSEC;") {
           if (accumulator) {
-            const info = extractId(accumulator);
+            const info = extractLineMeta(accumulator);
             if (info) {
               const refs = extractRefs(accumulator, info.id);
               index.set(info.id, info.type, refs, accumulator);
@@ -1150,7 +1126,7 @@ export class IfcSplitter {
         accumulator += (accumulator ? " " : "") + trimmed;
         if (accumulator.charCodeAt(accumulator.length - 1) === 59) {
           // ';'
-          const info = extractId(accumulator);
+          const info = extractLineMeta(accumulator);
           if (info) {
             const refs = extractRefs(accumulator, info.id);
             index.set(info.id, info.type, refs, accumulator);

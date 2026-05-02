@@ -2,21 +2,20 @@ const cr = "\r";
 const nl = "\n";
 
 /**
-
  *
  * @example
  * ```ts
  * let blob: Blob;
- * 
+ *
  * const ifcStream = blob
  *   .stream()
  *   .pipeThrough(new IfcDecoderStream());
- * 
+ *
  * for await (const line of ifcStream) {
  *   // parse line
  * }
  * ```
- * 
+ *
  * @example node
  * ```ts
  * let blob = await fs.openAsBlob(path, { type: "text/plain" });
