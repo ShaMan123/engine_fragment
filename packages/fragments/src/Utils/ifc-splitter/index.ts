@@ -11,7 +11,6 @@ import {
   parseHashRef,
   splitIfcArgs,
 } from "../ifc-parsing-utils";
-import { streamAsyncIterator } from "../ifc-stream";
 
 // ---------------------------------------------------------------------------
 // Exported interfaces
@@ -634,56 +633,6 @@ function resolveStyles(
 // Main split logic
 // ---------------------------------------------------------------------------
 
-async function emitSplitLine(
-  writers: (WritableStreamDefaultWriter | null)[],
-  raw: string,
-  groupsData: (GroupData | null)[],
-  idGroupMask: Uint32Array,
-): Promise<void> {
-  if (raw.charCodeAt(0) !== 35) return; // '#'
-  let id = 0;
-  for (let i = 1; i < raw.length; i++) {
-    const c = raw.charCodeAt(i);
-    if (c >= 48 && c <= 57) {
-      id = id * 10 + (c - 48);
-    } else {
-      break;
-    }
-  }
-  if (id === 0 || id >= idGroupMask.length) return;
-
-  const mask = idGroupMask[id];
-  if (mask === 0) return;
-
-  for (let g = 0; g < groupsData.length; g++) {
-    if (!(mask & (1 << g))) continue;
-    const gd = groupsData[g]!;
-    const line = gd.rewrittenLines.get(id) ?? raw;
-    await writers[g]!.write(`${line}\n`);
-  }
-}
-
-async function emitExtractLine(
-  writer: WritableStreamDefaultWriter,
-  raw: string,
-  includeSet: Set<number>,
-  rewrittenLines: Map<number, string>,
-): Promise<void> {
-  if (raw.charCodeAt(0) !== 35) return; // '#'
-  let id = 0;
-  for (let i = 1; i < raw.length; i++) {
-    const c = raw.charCodeAt(i);
-    if (c >= 48 && c <= 57) {
-      id = id * 10 + (c - 48);
-    } else {
-      break;
-    }
-  }
-  if (id === 0 || !includeSet.has(id)) return;
-  const line = rewrittenLines.get(id) ?? raw;
-  await writer.write(`${line}\n`);
-}
-
 export class IfcSplitter {
   protected readonly io: IfcSplitterIO;
   protected readonly eventTarget: EventTarget;
@@ -1044,43 +993,69 @@ export class IfcSplitter {
     index.free();
 
     const writeStart = performance.now();
-    const writer = (await this.io.writableStream(outputPath)).getWriter();
-    await writer.write(`${header.join("\n")}\n`);
+    const readableStream = await this.io.readableStream(inputPath);
+    const writableStream = await this.io.writableStream(outputPath);
 
     let section: "header" | "data" | "footer" = "header";
     let accumulator = "";
 
-    await this.forEachLine(inputPath, async (line: string) => {
-      if (section === "header") {
-        if (line.trim() === "DATA;") section = "data";
-        return;
+    function enqueue(
+      raw: string,
+      controller: TransformStreamDefaultController<string>,
+    ): void {
+      if (raw.charCodeAt(0) !== 35) return; // '#'
+      let id = 0;
+      for (let i = 1; i < raw.length; i++) {
+        const c = raw.charCodeAt(i);
+        if (c >= 48 && c <= 57) id = id * 10 + (c - 48);
+        else break;
       }
-      if (section === "data") {
-        const trimmed = line.trim();
-        if (trimmed === "ENDSEC;") {
-          if (accumulator) {
-            await emitExtractLine(writer, accumulator, fileIds, rewrittenLines);
-            accumulator = "";
-          }
-          section = "footer";
-          return;
-        }
+      if (id === 0 || !fileIds.has(id)) return;
+      controller.enqueue(`${rewrittenLines.get(id) ?? raw}\n`);
+    }
 
-        if (!accumulator && trimmed.charCodeAt(trimmed.length - 1) === 59) {
-          await emitExtractLine(writer, trimmed, fileIds, rewrittenLines);
-          return;
-        }
+    await readableStream
+      .pipeThrough(
+        new TransformStream<string, string>({
+          start(controller) {
+            controller.enqueue(`${header.join("\n")}\n`);
+          },
+          transform(line, controller) {
+            if (section === "header") {
+              if (line.trim() === "DATA;") section = "data";
+              return;
+            }
+            if (section === "data") {
+              const trimmed = line.trim();
+              if (trimmed === "ENDSEC;") {
+                if (accumulator) {
+                  enqueue(accumulator, controller);
+                  accumulator = "";
+                }
+                section = "footer";
+                return;
+              }
+              if (
+                !accumulator &&
+                trimmed.charCodeAt(trimmed.length - 1) === 59
+              ) {
+                enqueue(trimmed, controller);
+                return;
+              }
+              accumulator += (accumulator ? " " : "") + trimmed;
+              if (accumulator.charCodeAt(accumulator.length - 1) === 59) {
+                enqueue(accumulator, controller);
+                accumulator = "";
+              }
+            }
+          },
+          flush(controller) {
+            controller.enqueue(`${footer.join("\n")}\n`);
+          },
+        }),
+      )
+      .pipeTo(writableStream);
 
-        accumulator += (accumulator ? " " : "") + trimmed;
-        if (accumulator.charCodeAt(accumulator.length - 1) === 59) {
-          await emitExtractLine(writer, accumulator, fileIds, rewrittenLines);
-          accumulator = "";
-        }
-      }
-    });
-
-    await writer.write(`${footer.join("\n")}\n`);
-    await writer.close();
     this.emitProgressEvent("write", writeStart);
 
     return fileIds;
@@ -1090,66 +1065,61 @@ export class IfcSplitter {
     const header: string[] = [];
     const footer: string[] = [];
     const index = new LineIndex();
+    const readableStream = await this.io.readableStream(filePath);
 
     let section: "header" | "data" | "footer" = "header";
     let accumulator = "";
-    let lineCount = 0;
 
-    await this.forEachLine(filePath, (line: string) => {
-      if (section === "header") {
-        header.push(line);
-        if (line.trim() === "DATA;") section = "data";
-        return;
-      }
-      if (section === "data") {
-        const trimmed = line.trim();
-        if (trimmed === "ENDSEC;") {
-          if (accumulator) {
-            const info = extractLineMeta(accumulator);
-            if (info) {
-              const refs = extractRefs(accumulator, info.id);
-              index.set(info.id, info.type, refs, accumulator);
-              lineCount++;
+    await readableStream.pipeTo(
+      new WritableStream<string>({
+        write(line) {
+          if (section === "header") {
+            header.push(line);
+            if (line.trim() === "DATA;") section = "data";
+            return;
+          }
+          if (section === "data") {
+            const trimmed = line.trim();
+            if (trimmed === "ENDSEC;") {
+              if (accumulator) {
+                const info = extractLineMeta(accumulator);
+                if (info) {
+                  index.set(
+                    info.id,
+                    info.type,
+                    extractRefs(accumulator, info.id),
+                    accumulator,
+                  );
+                }
+                accumulator = "";
+              }
+              section = "footer";
+              footer.push(line);
+              return;
             }
-            accumulator = "";
+            accumulator += (accumulator ? " " : "") + trimmed;
+            if (accumulator.charCodeAt(accumulator.length - 1) === 59) {
+              const info = extractLineMeta(accumulator);
+              if (info) {
+                index.set(
+                  info.id,
+                  info.type,
+                  extractRefs(accumulator, info.id),
+                  accumulator,
+                );
+              }
+              accumulator = "";
+            }
+            return;
           }
-          section = "footer";
           footer.push(line);
-          return;
-        }
-        accumulator += (accumulator ? " " : "") + trimmed;
-        if (accumulator.charCodeAt(accumulator.length - 1) === 59) {
-          // ';'
-          const info = extractLineMeta(accumulator);
-          if (info) {
-            const refs = extractRefs(accumulator, info.id);
-            index.set(info.id, info.type, refs, accumulator);
-            lineCount++;
-          }
-          accumulator = "";
-        }
-        return;
-      }
-      footer.push(line);
-    });
+        },
+      }),
+    );
 
     index.finalize();
 
     return { header, footer, index };
-  }
-
-  /**
-   * Chunked file reader — replaces readline (3-5x faster)
-   */
-  async forEachLine(
-    filePath: string,
-    callback: (line: string) => void | Promise<void>,
-  ): Promise<void> {
-    const readableStream = await this.io.readableStream(filePath);
-
-    for await (const line of streamAsyncIterator(readableStream)) {
-      await callback(line);
-    }
   }
 
   protected async writeSplitOutput(
@@ -1159,59 +1129,97 @@ export class IfcSplitter {
     groupsData: (GroupData | null)[],
     idGroupMask: Uint32Array,
   ): Promise<void> {
-    const headerStr = `${header.join("\n")}\n`;
-
-    const writers: (WritableStreamDefaultWriter | null)[] = await Promise.all(
-      groupsData.map(async (groupData) => {
-        if (!groupData) return null;
-        const writer = (
-          await this.io.writableStream(groupData.fileName)
-        ).getWriter();
-        await writer.write(headerStr);
-        return writer;
-      }),
-    );
+    const readableStream = await this.io.readableStream(inputPath);
+    const writableStreams: (WritableStreamDefaultWriter | null)[] =
+      await Promise.all(
+        groupsData.map(async (groupData) => {
+          if (!groupData) return null;
+          const writer = (
+            await this.io.writableStream(groupData.fileName)
+          ).getWriter();
+          return writer;
+        }),
+      );
 
     let section: "header" | "data" | "footer" = "header";
     let accumulator = "";
 
-    await this.forEachLine(inputPath, async (line: string) => {
-      if (section === "header") {
-        if (line.trim() === "DATA;") section = "data";
-        return;
-      }
-      if (section === "data") {
-        const trimmed = line.trim();
-        if (trimmed === "ENDSEC;") {
-          if (accumulator) {
-            await emitSplitLine(writers, accumulator, groupsData, idGroupMask);
-            accumulator = "";
-          }
-          section = "footer";
-          return;
-        }
+    await readableStream
+      .pipeThrough(
+        new TransformStream<string, string>({
+          transform(line, controller) {
+            if (section === "header") {
+              if (line.trim() === "DATA;") section = "data";
+              return;
+            }
+            if (section === "data") {
+              const trimmed = line.trim();
+              if (trimmed === "ENDSEC;") {
+                if (accumulator) {
+                  controller.enqueue(accumulator);
+                  accumulator = "";
+                }
+                section = "footer";
+                return;
+              }
+              if (
+                !accumulator &&
+                trimmed.charCodeAt(trimmed.length - 1) === 59
+              ) {
+                controller.enqueue(trimmed);
+                return;
+              }
+              accumulator += (accumulator ? " " : "") + trimmed;
+              if (accumulator.charCodeAt(accumulator.length - 1) === 59) {
+                controller.enqueue(accumulator);
+                accumulator = "";
+              }
+            }
+          },
+        }),
+      )
+      .pipeTo(
+        new WritableStream<string>({
+          async start() {
+            const headerStr = `${header.join("\n")}\n`;
+            await Promise.all(
+              writableStreams.map(async (writer) => {
+                if (!writer) return;
+                await writer.write(headerStr);
+              }),
+            );
+          },
 
-        if (!accumulator && trimmed.charCodeAt(trimmed.length - 1) === 59) {
-          await emitSplitLine(writers, trimmed, groupsData, idGroupMask);
-          return;
-        }
+          async write(raw) {
+            if (raw.charCodeAt(0) !== 35) return; // '#'
+            let id = 0;
+            for (let i = 1; i < raw.length; i++) {
+              const c = raw.charCodeAt(i);
+              if (c >= 48 && c <= 57) id = id * 10 + (c - 48);
+              else break;
+            }
+            if (id === 0 || id >= idGroupMask.length) return;
+            const mask = idGroupMask[id];
+            if (mask === 0) return;
+            for (let g = 0; g < groupsData.length; g++) {
+              if (!(mask & (1 << g))) continue;
+              const line = groupsData[g]!.rewrittenLines.get(id) ?? raw;
+              await writableStreams[g]!.write(`${line}\n`);
+            }
+          },
 
-        accumulator += (accumulator ? " " : "") + trimmed;
-        if (accumulator.charCodeAt(accumulator.length - 1) === 59) {
-          await emitSplitLine(writers, accumulator, groupsData, idGroupMask);
-          accumulator = "";
-        }
-      }
-    });
-
-    const footerStr = `${footer.join("\n")}\n`;
-    await Promise.all(
-      writers.map(async (writer) => {
-        if (!writer) return;
-        await writer.write(footerStr);
-        await writer.close();
-      }),
-    );
+          async close() {
+            const footerStr = `${footer.join("\n")}\n`;
+            await Promise.all(
+              writableStreams.map(async (writer) => {
+                if (!writer) return;
+                await writer.write(footerStr);
+                await writer.close();
+              }),
+            );
+          },
+        }),
+      );
   }
 
   protected emitProgressEvent(stage: IfcSplitterStage, start: number) {
