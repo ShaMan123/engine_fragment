@@ -6,6 +6,7 @@ import * as path from "path";
 import * as fs from "fs";
 import pluginTerser from "@rollup/plugin-terser";
 import * as packageJson from "./package.json";
+import { publicMembersOnly } from "./utils/public-members";
 
 // const generateTSNamespace = (dts: Map<string, string>) => {
 //   if (!fs.existsSync("./dist")) return;
@@ -92,6 +93,11 @@ export default defineConfig({
     dts({
       include: ["./src"],
       rollupTypes: true,
+      // A class that marks members `public` publishes only those.
+      beforeWriteFile: publicMembersOnly({
+        sourceDir: path.resolve(__dirname, "src"),
+        declarationDir: path.resolve(__dirname, "dist"),
+      }),
       exclude: [
         "./src/**/example.ts",
         "./src/**/node-example.ts",
