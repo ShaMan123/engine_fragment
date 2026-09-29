@@ -20,7 +20,7 @@ export class Editor {
   /**
    * Event triggered when an edit is made.
    */
-  onEdit = new Event<{ modelId: string }>();
+  public onEdit = new Event<{ modelId: string }>();
 
   private _editHelper: EditHelper;
   private _elementsHelper: ElementsHelper;
@@ -37,7 +37,7 @@ export class Editor {
    * @param config - The configuration for the edit.
    * @returns The IDs of the elements that were edited.
    */
-  async edit(
+  public async edit(
     modelId: string,
     actions: EditRequest[],
     config = {
@@ -54,7 +54,7 @@ export class Editor {
    * @param modelId - The ID of the model to save.
    * @returns The requests that were saved.
    */
-  async save(modelId: string) {
+  public async save(modelId: string) {
     return this._editHelper.save(modelId);
   }
 
@@ -62,7 +62,7 @@ export class Editor {
    * Resets the edits of the specified Fragments model.
    * @param modelId - The ID of the model to reset.
    */
-  async reset(modelId: string) {
+  public async reset(modelId: string) {
     await this._editHelper.reset(modelId);
   }
 
@@ -71,7 +71,7 @@ export class Editor {
    * @param modelId - The ID of the model to get the requests from.
    * @returns The requests of the model.
    */
-  async getModelRequests(modelId: string) {
+  public async getModelRequests(modelId: string) {
     return this._editHelper.getRequests(modelId);
   }
 
@@ -82,7 +82,7 @@ export class Editor {
    * @param index - The index of the request to select.
    * @returns The selected request.
    */
-  async selectRequest(modelId: string, index: number) {
+  public async selectRequest(modelId: string, index: number) {
     return this._editHelper.selectRequest(modelId, index);
   }
 
@@ -91,7 +91,7 @@ export class Editor {
    * @param modelId - The ID of the model to clear the requests from.
    */
 
-  clearElementsRequests(modelId: string) {
+  public clearElementsRequests(modelId: string) {
     return this._elementsHelper.getRequests(modelId);
   }
 
@@ -101,7 +101,7 @@ export class Editor {
    * @param material - The material to create.
    * @returns The created material.
    */
-  createMaterial(modelId: string, material: THREE.MeshLambertMaterial) {
+  public createMaterial(modelId: string, material: THREE.MeshLambertMaterial) {
     return this._elementsHelper.createMaterial(modelId, material);
   }
 
@@ -111,7 +111,7 @@ export class Editor {
    * @param transform - The local transform to create.
    * @returns The created local transform.
    */
-  createLocalTransform(modelId: string, transform: THREE.Matrix4) {
+  public createLocalTransform(modelId: string, transform: THREE.Matrix4) {
     return this._elementsHelper.createLocalTransform(modelId, transform);
   }
 
@@ -121,7 +121,7 @@ export class Editor {
    * @param geometry - The geometry of the shell to create.
    * @returns The created shell.
    */
-  createShell(modelId: string, geometry: THREE.BufferGeometry) {
+  public createShell(modelId: string, geometry: THREE.BufferGeometry) {
     return this._elementsHelper.createShell(modelId, geometry);
   }
 
@@ -131,7 +131,7 @@ export class Editor {
    * @param data - The data of the circle extrusion to create.
    * @returns The created circle extrusion.
    */
-  createCircleExtrusion(modelId: string, data: RawCircleExtrusion) {
+  public createCircleExtrusion(modelId: string, data: RawCircleExtrusion) {
     return this._elementsHelper.createCircleExtrusion(modelId, data);
   }
 
@@ -142,7 +142,7 @@ export class Editor {
    * @param itemId - The ID of the item to create the global transform for.
    * @returns The created global transform.
    */
-  createGlobalTransform(
+  public createGlobalTransform(
     modelId: string,
     transform: THREE.Matrix4,
     itemId: number | string,
@@ -160,7 +160,7 @@ export class Editor {
    * @param data - The data of the sample to create.
    * @returns The created sample.
    */
-  createSample(
+  public createSample(
     modelId: string,
     data: {
       localTransform: number | string;
@@ -178,7 +178,7 @@ export class Editor {
    * @param item - The item to create.
    * @returns The created item.
    */
-  createItem(modelId: string, item: RawItemData) {
+  public createItem(modelId: string, item: RawItemData) {
     return this._elementsHelper.createItem(modelId, item);
   }
 
@@ -190,7 +190,7 @@ export class Editor {
    * Live reads via `model.getIndexEntry` see the pending index immediately;
    * `applyChanges` makes it survive a save/reload cycle.
    */
-  createIndex(modelId: string, data: RawIndexData) {
+  public createIndex(modelId: string, data: RawIndexData) {
     this._elementsHelper.createIndex(modelId, data);
   }
 
@@ -199,7 +199,7 @@ export class Editor {
    * `data.name` in its entirety. Use `deleteIndex` + `createIndex` if you
    * want to rename.
    */
-  updateIndex(modelId: string, data: RawIndexData) {
+  public updateIndex(modelId: string, data: RawIndexData) {
     this._elementsHelper.updateIndex(modelId, data);
   }
 
@@ -207,7 +207,7 @@ export class Editor {
    * Queues a DELETE_INDEX request. No-op at flush time if the named index
    * doesn't exist on the model.
    */
-  deleteIndex(modelId: string, name: string) {
+  public deleteIndex(modelId: string, name: string) {
     this._elementsHelper.deleteIndex(modelId, name);
   }
 
@@ -217,7 +217,7 @@ export class Editor {
    * @param item - The item to set.
    * @returns The set item.
    */
-  setItem(modelId: string, item: ItemData) {
+  public setItem(modelId: string, item: ItemData) {
     return this._elementsHelper.setItem(modelId, item);
   }
 
@@ -229,7 +229,7 @@ export class Editor {
    * @param itemIds - The IDs of the items to relate.
    * @returns The related items.
    */
-  async relate(
+  public async relate(
     modelId: string,
     itemId: number,
     relationName: string,
@@ -246,7 +246,7 @@ export class Editor {
    * @param itemIds - The IDs of the items to unrelate.
    * @returns The unrelated items.
    */
-  async unrelate(
+  public async unrelate(
     modelId: string,
     itemId: number,
     relationName: string,
@@ -266,7 +266,7 @@ export class Editor {
    * @param localIds - The local IDs of the elements to get.
    * @returns The elements of the model.
    */
-  async getElements(modelId: string, localIds: Iterable<number>) {
+  public async getElements(modelId: string, localIds: Iterable<number>) {
     return this._elementsHelper.get(modelId, localIds);
   }
 
@@ -276,7 +276,7 @@ export class Editor {
    * @param elements - The elements to create.
    * @returns The created elements.
    */
-  async createElements(modelId: string, elements: NewElementData[]) {
+  public async createElements(modelId: string, elements: NewElementData[]) {
     return this._elementsHelper.create(modelId, elements);
   }
 
@@ -286,7 +286,7 @@ export class Editor {
    * @param elements - The elements to delete.
    * @returns The deleted elements.
    */
-  deleteElements(modelId: string, elements: Element[]) {
+  public deleteElements(modelId: string, elements: Element[]) {
     return this._elementsHelper.delete(modelId, elements);
   }
 
@@ -296,7 +296,7 @@ export class Editor {
    * @param elements - The elements to apply the changes to.
    * @returns The applied changes.
    */
-  async applyChanges(modelId: string, elements: Element[] = []) {
+  public async applyChanges(modelId: string, elements: Element[] = []) {
     return this._elementsHelper.applyChanges(modelId, elements);
   }
 
@@ -306,7 +306,7 @@ export class Editor {
    * @param data - The data to delete.
    * @returns The deleted data.
    */
-  async deleteData(
+  public async deleteData(
     modelId: string,
     data: {
       itemIds?: Iterable<number>;
