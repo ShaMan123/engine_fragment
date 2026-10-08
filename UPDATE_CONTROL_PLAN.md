@@ -46,18 +46,266 @@ Fixes, not settings. Every piece of worker work comes from a request, so the loo
 
 The yield between slices is a macrotask, not `requestAnimationFrame`. Draining is not rendering: it must yield to input, the app's own render and paint between slices, and run back to back when the loop is idle, regardless of visibility. `requestAnimationFrame` would cap throughput at one slice per frame, put our 4 ms inside the app's frame budget, show tiles a frame late whenever we land after the app's render, and halt streaming in a hidden tab as a side effect rather than through `pause()`. `queueMicrotask` is wrong because microtasks run before paint. `setTimeout(0)` works but the spec clamps nested timers to 4 ms after five levels, which halves the duty cycle of 4 ms slices; `MessageChannel.postMessage` is the unclamped macrotask and is available in Node. The first slice can run synchronously in the message handler, since the arrival is the trigger.
 
-### 3. `UpdateManager` owns the main-thread update logic
+### 3. `UpdateManager` and `ThreadUpdater` own the scheduling
+
+Today scheduling is spread over `FragmentsModels` (throttle, coalescing, poll), `MeshManager` (`_onUpdate` re-arms the poll), `ThreadUpdater` (the sweep), `MeshConnection` (the flush interval) and `ThreadModelCreator` (`start()`, the delay). Afterwards each side has one owner: `UpdateManager` on the main thread and `ThreadUpdater` on each worker. They talk only through messages: REFRESH_VIEW and CONTROL_UPDATES go down, tile batches come up. Decisions 1 and 4 list the line-level changes; this section is the shape they fit into. The drain loop stays in `MeshManager` (decision 2) because tile arrivals drive it, not the schedule.
+
+The worker keeps driving its own sweep. Driving every tick from main would cost a round trip per 16 ms tick and stall streaming whenever the main thread is busy, which is when the app renders. `step()` covers apps that want that lockstep.
+
+#### Main thread: `UpdateManager`
 
 New class in `packages/fragments/src/FragmentsModels/src/model/update-manager.ts`, named like `ViewManager` and `MeshManager`. Everything from [index.ts:172-178](packages/fragments/src/FragmentsModels/index.ts#L172-L178) and [index.ts:411-532](packages/fragments/src/FragmentsModels/index.ts#L411-L532) moves into it:
 
 - `update(force)` with the `maxUpdateRate` throttle, the trailing update for throttled unforced calls (both modes, so the last camera position always reaches the worker), and the forced coalescing from #300.
-- The view poll, armed after each update only when `settings.autoRefreshView` is true. It compares signatures and sends nothing unless something changed.
-- `pause()`, `resume()` and optionally `step()`, see 4.
+- The view poll, armed after each update only when `settings.autoRefreshView` is true and the manager is not paused. It compares signatures and sends nothing unless something changed.
+- `pause()`, `resume()` and optionally `step()`, which forward to the worker half (see 4).
 - `dispose()` clears the timers and releases forced waiters.
 
-It reads `maxUpdateRate` and `autoRefreshView` live from the `settings` object so the public knobs stay where they are. `FragmentsModels` keeps `update(force)` as a one-line delegate and exposes the manager as `updater`.
+It reads `maxUpdateRate` and `autoRefreshView` live from the `settings` object so the public knobs stay where they are. `FragmentsModels` keeps `update(force)` as a one-line delegate and exposes the manager as `updater`. `newUpdateEvent` goes, and `MeshManager` loses its constructor argument (decision 2).
 
 `settings.autoRefreshView` (default `true`) replaces the earlier `autoUpdate` name because it now governs only the view poll. The flag is read when the poll would be armed; switching it off stops the poll at its next tick, switching it on takes effect at the next `update()` call.
+
+The trailing update and the poll share one timer, `_next`: "an `update()` is due at the end of the current window". Today they share `_autoRedrawInterval` already, but each throttled call pushes it a full window out; arming it once for the end of the window is enough, and it does not need re-arming while a forced update is pending, since that one sends the view too.
+
+```ts
+export class UpdateManager {
+  private _lastUpdate = 0;
+  private _next: ReturnType<typeof setTimeout> | null = null;
+  private _forced: {
+    promise: Promise<void>;
+    resolve: () => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
+  private _paused = false;
+  private _step = 0;
+  private _disposed = false;
+
+  constructor(
+    private readonly _settings: FragmentsModels["settings"],
+    private readonly _models: MeshManager,
+    private readonly _connection: FragmentsConnection,
+  ) {}
+
+  get paused() {
+    return this._paused;
+  }
+
+  async update(force = false) {
+    if (this._disposed) return;
+    const wait =
+      this._lastUpdate + this._settings.maxUpdateRate - performance.now();
+    if (wait <= 0) return this.perform(force);
+    if (force) return this.coalesceForced(wait + 1);
+    this.arm(wait + 1);
+  }
+
+  pause() {
+    if (this._paused) return Promise.resolve();
+    this._paused = true;
+    // A pending _next still fires, so the last view reaches the worker;
+    // perform() just does not re-arm the poll after it.
+    return this.control("pause");
+  }
+
+  resume() {
+    if (!this._paused) return Promise.resolve();
+    this._paused = false;
+    const sent = this.control("resume");
+    this.update(); // sends a view that changed while paused, re-arms the poll
+    return sent;
+  }
+
+  step() {
+    if (!this._paused) return Promise.resolve();
+    return this.control("step", ++this._step);
+  }
+
+  dispose() {
+    this._disposed = true;
+    if (this._next !== null) clearTimeout(this._next);
+    if (this._forced) {
+      clearTimeout(this._forced.timer);
+      this._forced.resolve();
+      this._forced = null;
+    }
+  }
+
+  private async perform(force: boolean) {
+    this._lastUpdate = performance.now();
+    this.disarm();
+    const refreshes: Promise<void>[] = [];
+    for (const model of this._models.list.values()) {
+      refreshes.push(model._refreshView(force));
+    }
+    await Promise.all(refreshes);
+    if (force) await this._models.forceUpdateFinish();
+    if (this._settings.autoRefreshView && !this._paused) {
+      this.arm(this._settings.maxUpdateRate + 1);
+    }
+  }
+
+  private coalesceForced(delay: number) {
+    if (!this._forced) {
+      let resolve!: () => void;
+      const promise = new Promise<void>((r) => (resolve = r));
+      const timer = setTimeout(() => {
+        this._forced = null;
+        this.perform(true).then(resolve, () => resolve());
+      }, delay);
+      this._forced = { promise, resolve, timer };
+    }
+    return this._forced.promise;
+  }
+
+  private arm(delay: number) {
+    if (this._next !== null || this._forced || this._disposed) return;
+    if (this._models.list.size === 0) return;
+    this._next = setTimeout(() => {
+      this._next = null;
+      this.update();
+    }, delay);
+  }
+
+  private disarm() {
+    if (this._next === null) return;
+    clearTimeout(this._next);
+    this._next = null;
+  }
+
+  // One message per model because requests are routed by modelId; the
+  // worker side is idempotent. `seq: null` keeps the message out of the
+  // fence: it never produces a FINISH, so a seq would raise the target of
+  // a pending update(true) that nothing then meets.
+  private control(action: "pause" | "resume" | "step", step?: number) {
+    const sent: Promise<unknown>[] = [];
+    for (const modelId of this._models.list.keys()) {
+      sent.push(
+        this._connection.fetch({
+          class: MultiThreadingRequestClass.CONTROL_UPDATES,
+          modelId,
+          action,
+          step,
+          seq: null,
+        }),
+      );
+    }
+    return Promise.all(sent).then(() => {});
+  }
+}
+```
+
+`pause()`, `resume()` and `step()` return the sends, so an older worker that rejects `CONTROL_UPDATES` surfaces to a caller that awaits (decision 4). `seq: null` relies on [`FragmentsConnection.fetch`](packages/fragments/src/FragmentsModels/src/multithreading/fragments-connection.ts#L128-L133) stamping only `undefined` and the worker bumping `lastSeenSeq` only for numbers.
+
+A model loaded while paused must start paused. Rather than a `pause` sent after the model joins the list (decision 4 as written), the CREATE_MODEL input carries `paused: updater.paused`, set where the request is built and outside the user-facing `VirtualMultithreadingConfig`, so both creation paths ([index.ts:258-266](packages/fragments/src/FragmentsModels/index.ts#L258-L266) and the delta model in [edit-helper.ts:235-241](packages/fragments/src/FragmentsModels/src/edit/edit-helper.ts#L235-L241)) get it without a list subscription (decision 5).
+
+#### Worker: `ThreadUpdater`
+
+Same class, reshaped. It has no idle tick and no delay; it ticks only while some model is unsettled. Its state is a pending tick or none, plus a `paused` flag:
+
+- **Idle**: no timer. Reached when every model is settled (an empty list and a model without a view count as settled), or right away while paused.
+- **Running**: one tick queued. A tick sweeps up to 16 ms round-robin as today, flushes, and queues the next tick only if something is still unsettled.
+- **Paused**: ticks exit and `wake()` returns early. Requests are still applied and their output still flushed, so a forced update with an unchanged view settles while paused (the exception in decision 4).
+
+What wakes it: every request, through one call at the end of [`FragmentsThread.handleInput`](packages/fragments/src/FragmentsModels/src/multithreading/fragments-thread.ts#L54-L63) (extracted from the connection handler, decision 1), in a `finally` so a failing raycast still leaves the loop correct. View changes, edits, visibility and highlight all restart a pass through that path, and a request that changed nothing finds every model settled and the tick goes idle at once. `resume()` and `step()` are the only other entries.
+
+```ts
+export class ThreadUpdater {
+  private readonly _budget = 16;
+  private _timer: ReturnType<typeof setTimeout> | null = null;
+  private _paused = false;
+  private _lastStep = 0;
+  private _nextModelOffset = 0;
+
+  constructor(private readonly _thread: FragmentsThread) {}
+
+  // Called after every request. The flush ships what the request itself
+  // produced (setupView's direct FINISH for an unchanged view), paused or
+  // not; the wake makes sure a sweep follows.
+  afterRequest() {
+    this.flush();
+    this.wake();
+  }
+
+  setPaused(paused: boolean) {
+    if (paused) this.pause();
+    else this.resume();
+  }
+
+  pause() {
+    this._paused = true;
+    this.cancel();
+  }
+
+  resume() {
+    this._paused = false;
+    this.wake();
+  }
+
+  // One bounded sweep while paused. Main sends one copy per model on this
+  // worker; the id turns the extra copies into no-ops. afterRequest flushes.
+  step(id: number) {
+    if (!this._paused || id <= this._lastStep) return;
+    this._lastStep = id;
+    this.sweep();
+  }
+
+  dispose() {
+    this.cancel();
+  }
+
+  private wake() {
+    if (this._paused || this._timer !== null) return;
+    this._timer = setTimeout(this._tick, 0); // the yield from decision 2
+  }
+
+  private cancel() {
+    if (this._timer === null) return;
+    clearTimeout(this._timer);
+    this._timer = null;
+  }
+
+  private _tick = () => {
+    this._timer = null;
+    if (this._paused) return;
+    const settled = this.sweep();
+    this.flush();
+    if (!settled) this.wake();
+  };
+
+  // Today's updateAllModels: rotates the start model and stops after
+  // _budget ms. True only when every model was reached and reported settled.
+  private sweep(): boolean {
+    // ...
+  }
+
+  private flush() {
+    for (const model of this._thread.list.values()) model.flushMeshes();
+  }
+}
+```
+
+`_updateDelay`, `setUpdateDelay` and `_running` go; `start()` becomes `wake()`, and the call at [thread-model-creator.ts:81](packages/fragments/src/FragmentsModels/src/multithreading/thread-controllers/thread-model-creator.ts#L81) is redundant with `afterRequest`. The creator calls `setPaused(input.paused)` where it calls `setUpdateDelay` today ([:31](packages/fragments/src/FragmentsModels/src/multithreading/thread-controllers/thread-model-creator.ts#L31)). `ThreadUpdateController` (decision 4) is a thin `ThreadController` that maps `action` to `pause()`, `resume()` or `step(input.step)`.
+
+The tick yield is the same macrotask question as the drain loop in decision 2: a nested `setTimeout(0)` is clamped to 4 ms in workers too, which today costs a fifth of a streaming worker's time. Whatever helper decision 2 settles on is shared by both loops.
+
+**The flush moves into the tick.** Every tile request a worker emits comes from a sweep, except the direct FINISH in [`setupView`](packages/fragments/src/FragmentsModels/src/virtual-model/virtual-controllers/virtual-tiles-controller.ts#L258-L260), which runs inside a request handler. Flushing at the end of every tick and after every request therefore ships everything, so `MeshConnection` needs no timer at all: it keeps `process()` with the threshold flush, gains a public `flush()`, and `clean()` stays. The tail of a pass (fewer than `meshConnectionThreshold` requests, including the final FINISH) ships when the tick ends instead of up to `meshConnectionRate` later. `meshConnectionRate` is then no longer read and is deprecated with `threadUpdaterDelay`. This goes one step past the one-shot timer in decision 1; see Open.
+
+#### Who wakes whom
+
+| Trigger | Main thread | Worker |
+|---|---|---|
+| App calls `update()` | Throttle, then REFRESH_VIEW for changed views. A throttled call arms `_next`. | `afterRequest`: view stored, flush, wake. |
+| `_next` fires | `update()`. Re-armed only with `autoRefreshView` and not paused. | |
+| Tick | | Sweep ≤ 16 ms, flush, wake again unless settled. |
+| Batch lands | Drain slice, chained while pending, `onTilesUpdated` (decision 2). | |
+| FINISH lands | `drainAll`, release fences. | |
+| Edit, visibility, raycast | | `afterRequest`; sweeps if the request restarted a pass. |
+| `pause()` | Poll stops at its next firing. CONTROL `pause`. | Cancel the tick. |
+| `resume()` | CONTROL `resume`, then `update()`. | Wake. |
+| `step()` | CONTROL `step` with a new id. | One sweep, flush. |
+| Load while paused | CREATE_MODEL carries `paused`. | `setPaused` before the model registers. |
+
+Idle, the main thread holds `_next` only with `autoRefreshView` on, and the worker holds no timer.
 
 ### 4. The worker can be paused
 
@@ -115,6 +363,9 @@ CONTRIBUTING asks for an issue first; one issue can frame 2 to 4.
 ## Open
 
 - Final name of the setting: `autoRefreshView` proposed, `pollViewChanges` if the mechanism should be in the name.
-- `MessageChannel` versus `setTimeout(0)` for the slice yield.
+- `MessageChannel` versus `setTimeout(0)` for the slice yield, and with it for the worker tick (section 3).
 - Whether an app should be able to take over draining (slices aligned to its own frame). Not in scope; the arrival-driven loop leaves room for a later `applyPending(budget)`.
 - The three existing internal subscriptions to public events.
+- Flush at the end of each tick (section 3) or a one-shot timer per model (decision 1). The tick removes the last per-model timer and `meshConnectionRate`; the one-shot timer is the smaller change for PR 2 and keeps the setting meaningful. If the tick wins, decision 1's `MeshConnection` bullet and the `mesh-connection.test.ts` cases in PR 2 change with it.
+- How a new worker starts paused: a `paused` field on CREATE_MODEL (section 3) or a `pause` sent once the model joins the list (decision 4). The field needs no list hook and leaves no window between the two messages.
+- Any RPC dispatched while `update(true)` awaits its refreshes, such as a raycast or a box fetch, raises the fence target the way a control message would. If the pass had already finished, no FINISH arrives to meet it until the view changes. Control messages avoid it with `seq: null`; whether raycasts already hang this way needs a test.
