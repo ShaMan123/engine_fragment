@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { FragmentsModels, ItemData } from "../..";
+import { FragmentsModel, FragmentsModels, ItemData } from "../..";
 import {
   EditRequest,
   Event,
@@ -25,8 +25,8 @@ export class Editor {
   private _elementsHelper: ElementsHelper;
 
   constructor(core: FragmentsModels) {
-    this._editHelper = new EditHelper(core);
     this._elementsHelper = new ElementsHelper(core);
+    this._editHelper = new EditHelper(core, this._elementsHelper);
   }
 
   /**
@@ -321,9 +321,9 @@ export class Editor {
 
   /**
    * Internal method to update the specified Fragments model. Do not use this method directly.
-   * @param modelId - The ID of the model to update.
+   * @param model - The model to update.
    */
-  async _update(modelId: string) {
-    await this._editHelper._update(modelId);
+  async _update(model: FragmentsModel) {
+    await this._editHelper._update(model);
   }
 }
