@@ -14,6 +14,7 @@ import {
   AttributesUniqueValuesParams,
   CRSData,
   CurrentLod,
+  HighlightDefinition,
   Identifier,
   ItemsDataConfig,
   IndexArrayType,
@@ -304,7 +305,7 @@ export class VirtualFragmentsModel {
 
   highlight(
     items: number[] | undefined,
-    highlightMaterial: MaterialDefinition,
+    highlightMaterial: HighlightDefinition,
   ) {
     this._highlightHelper.highlight(this, items, highlightMaterial);
   }
@@ -884,8 +885,10 @@ export class VirtualFragmentsModel {
   }
 
   private _onTransferMaterial = (data: any, trans: any) => {
-    if (!this._connection) return undefined;
-    return this._connection.fetch(data, trans);
+    if (!this._connection) return;
+    // Fire-and-forget: if the main thread fails to handle it, it logs the
+    // error itself, and there is nothing to do about it here.
+    this._connection.fetch(data, trans).catch(() => {});
   };
 
   private setupItemsConfig() {

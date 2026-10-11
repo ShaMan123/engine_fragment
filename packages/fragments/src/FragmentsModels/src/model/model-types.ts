@@ -1,6 +1,6 @@
 import * as THREE from "three";
-import { LodMaterial, LODMesh } from "../lod";
 import { RenderedFaces, RepresentationClass } from "../../../Schema";
+import { LodMaterial, LODMesh } from "../lod";
 import { FragmentsModel } from "./fragments-model";
 
 /**
@@ -158,6 +158,16 @@ export type MaterialDefinition = {
    */
   _explicitProps?: string[];
 };
+
+/**
+ * An item's highlight, see {@link FragmentsModel.getHighlight}. A highlight
+ * that preserves the item's original material, like the ones
+ * {@link FragmentsModel.setColor} and {@link FragmentsModel.setOpacity} make,
+ * only holds the properties it changes.
+ */
+export type HighlightDefinition =
+  | MaterialDefinition
+  | (Partial<MaterialDefinition> & { preserveOriginalMaterial: true });
 export interface MaterialData {
   data: MaterialDefinition;
   transparent?: boolean;
@@ -265,6 +275,102 @@ export enum SnappingClass {
 export interface ModelIdMap {
   [key: string]: number[] | undefined;
 }
+
+/**
+ * Runs of a tile's index (or vertex) buffer: `position` and `size` hold the
+ * start and the length of each run.
+ */
+export type TileRuns = {
+  position: Uint32Array;
+  size: Uint32Array;
+};
+
+/** How to draw a tile: what of it is visible, and what highlighted. */
+export type TileStatus = {
+  /** Undefined when the tile is hidden altogether. */
+  visibilityData: TileRuns | undefined;
+  highlightData: TileRuns | undefined;
+  /** The highlight of each run of `highlightData`. */
+  highlightIds: Uint16Array | undefined;
+};
+
+/** Adds a tile to a model's meshes. */
+export type CreateTileRequest = {
+  tileRequestClass: TileRequestClass.CREATE;
+  uid: ModelUid;
+  tileId: number;
+  objectClass: ObjectClass;
+  itemId: undefined;
+  tileData: TileStatus;
+  indices: DataBuffer | undefined;
+  positions: Float32Array | undefined;
+  normals: DataBuffer | undefined;
+  faceIds: Float32Array;
+  itemIds: DataBuffer | undefined;
+  /** The model's material the tile is drawn with. */
+  material: number;
+  matrix: THREE.Matrix4;
+  aabb: THREE.Box3;
+  currentLod: CurrentLod;
+};
+
+/** Changes how a tile of a model's meshes is drawn. */
+export type UpdateTileRequest = {
+  tileRequestClass: TileRequestClass.UPDATE;
+  uid: ModelUid;
+  tileId: number;
+  objectClass: ObjectClass;
+  material: number;
+  tileData: TileStatus;
+  currentLod: CurrentLod;
+};
+
+/** Removes a tile from a model's meshes. */
+export type DeleteTileRequest = {
+  tileRequestClass: TileRequestClass.DELETE;
+  uid: ModelUid;
+  tileId: number;
+};
+
+/** Marks the end of a pass over a model's tiles. */
+export type FinishTileRequest = {
+  tileRequestClass: TileRequestClass.FINISH;
+  uid: ModelUid;
+  /** The last request the worker had handled, see FragmentsConnection.fetch. */
+  seq: number;
+};
+
+/** A change to a model's meshes, see {@link TileRequestClass}. */
+export type TileRequest =
+  | CreateTileRequest
+  | UpdateTileRequest
+  | DeleteTileRequest
+  | FinishTileRequest;
+
+/**
+ * A request a worker sends to the main thread, which routes it to the model
+ * with that uid.
+ */
+export type WorkerRequest =
+  | {
+      class: MultiThreadingRequestClass.RECOMPUTE_MESHES;
+      uid: ModelUid;
+      list: TileRequest[];
+    }
+  | {
+      class: MultiThreadingRequestClass.CREATE_MATERIAL;
+      uid: ModelUid;
+      /** The model's materials, then the highlights added since. */
+      materialDefinitions: HighlightDefinition[];
+      /** The id the worker assigned to `materialDefinitions[0]`. */
+      firstId: number;
+    }
+  | {
+      class: MultiThreadingRequestClass.LOAD_PROGRESS;
+      uid: ModelUid;
+      stage: LoadProgressEvent["stage"];
+      progress: number;
+    };
 
 /**
  * Union type representing all possible data buffer types.
@@ -713,9 +819,9 @@ export interface MappedInformationResult {
    */
   guid: (string | null)[];
   /**
-   * An array of highlight materials for the item.
+   * The highlight of each item, or undefined for an item without one.
    */
-  highlight: MaterialDefinition[];
+  highlight: (HighlightDefinition | undefined)[];
   /**
    * An array of relation records for the item.
    */

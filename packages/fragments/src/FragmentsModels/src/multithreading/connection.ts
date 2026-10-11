@@ -4,27 +4,34 @@ import {
   type ThreadHandler,
 } from "./connection-handlers";
 import { MultithreadingHelper } from "./multithreading-helper";
-import type { ModelUid } from "../model/model-types";
+import type { Cloned } from "./cloned";
+import type { ModelUid, TileRequest } from "../model/model-types";
 
-export class Connection {
+/**
+ * One side of the message layer between the main thread and a worker.
+ * `TInput` is what the other side sends it as requests.
+ */
+export class Connection<TInput extends object = object> {
   private readonly _handlers = new ConnectionHandlers();
-  private readonly _handleInput: ThreadHandler;
+  private readonly _handleInput: ThreadHandler<TInput>;
   private _port?: MessagePort;
 
-  constructor(handleInput: ThreadHandler) {
+  constructor(handleInput: ThreadHandler<TInput>) {
     this._handleInput = handleInput;
   }
 
-  fetchMeshCompute(uid: ModelUid, list: any[]) {
+  fetchMeshCompute(uid: ModelUid, list: TileRequest[]) {
     const helper = MultithreadingHelper;
     const input = helper.getMeshComputeRequest(uid, list);
     const content = helper.getRequestContent(input);
-    this.fetch(input, content);
+    // Fire-and-forget: if the main thread fails to handle it, it logs the
+    // error itself, and there is nothing to do about it here.
+    this.fetch(input, content).catch(() => {});
   }
 
   fetch<T extends object>(input: T, content: any[] = []) {
     const message = this._handlers.setupInput(input);
-    return new Promise<T & MessageBase>((resolve, reject) => {
+    return new Promise<Cloned<T> & MessageBase>((resolve, reject) => {
       // Routing and sending happen before this returns, so a caller that
       // frees a route right after (see FragmentsConnection.delete) still
       // sends through it. If either throws, the promise rejects: nothing
@@ -36,8 +43,9 @@ export class Connection {
           reject(response.errorInfo);
           return;
         }
-        // The other side answers with the message it received, results added.
-        resolve(response as T & MessageBase);
+        // The other side answers with a copy of the message it received,
+        // results added.
+        resolve(response as Cloned<T> & MessageBase);
       });
     });
   }
@@ -75,7 +83,9 @@ export class Connection {
       return;
     }
     try {
-      await this._handleInput(data);
+      // Anything that isn't an answer is a request, which the other side
+      // sends as a TInput.
+      await this._handleInput(data as Cloned<TInput> & MessageBase);
     } catch (error: any) {
       data.errorInfo = error.toString();
       // Aborts are intentional — don't log them as unexpected errors.

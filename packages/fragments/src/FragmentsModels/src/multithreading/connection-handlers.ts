@@ -1,3 +1,5 @@
+import type { Cloned } from "./cloned";
+
 export type MessageBase = {
   requestId: number;
   /** Set on answers, in either direction, despite the name. */
@@ -5,7 +7,10 @@ export type MessageBase = {
   errorInfo?: string;
 };
 
-export type ThreadHandler = (args: MessageBase) => Promise<void> | void;
+/** Handles what the other side sent, which arrives as a copy. */
+export type ThreadHandler<T extends object = object> = (
+  args: Cloned<T> & MessageBase,
+) => Promise<void> | void;
 
 export class ConnectionHandlers {
   private readonly _list = new Map<

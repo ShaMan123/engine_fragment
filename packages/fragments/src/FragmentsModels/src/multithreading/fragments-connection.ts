@@ -1,4 +1,8 @@
-import { ModelUid, MultiThreadingRequestClass } from "../model/model-types";
+import {
+  ModelUid,
+  MultiThreadingRequestClass,
+  WorkerRequest,
+} from "../model/model-types";
 import { Cloned } from "./cloned";
 import { Connection } from "./connection";
 import { ThreadHandler } from "./connection-handlers";
@@ -22,7 +26,7 @@ export interface FragmentsConnectionOptions {
   threadGroups?: Record<string, number>;
 }
 
-export class FragmentsConnection extends Connection {
+export class FragmentsConnection extends Connection<WorkerRequest> {
   private readonly _data: ThreadsData;
   private readonly _classicWorker: boolean;
   private readonly _maxWorkers: number;
@@ -47,7 +51,7 @@ export class FragmentsConnection extends Connection {
   }
 
   constructor(
-    handleInput: ThreadHandler,
+    handleInput: ThreadHandler<WorkerRequest>,
     threadPath: string,
     options?: FragmentsConnectionOptions,
   ) {
@@ -150,12 +154,10 @@ export class FragmentsConnection extends Connection {
    * RPC type — EXECUTE, REFRESH_VIEW, GET_BOXES, etc. — is covered
    * uniformly.
    */
-  override fetch<T extends object>(
-    input: T & { seq?: number },
-    content?: any[],
-  ) {
-    if (input.seq === undefined) {
-      input.seq = MultithreadingHelper.nextSeq();
+  override fetch<T extends object>(input: T, content?: any[]) {
+    const request = input as { seq?: number };
+    if (request.seq === undefined) {
+      request.seq = MultithreadingHelper.nextSeq();
     }
     return super.fetch(input, content);
   }
