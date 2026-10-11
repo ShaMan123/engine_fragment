@@ -208,7 +208,9 @@ export enum MultiThreadingRequestClass {
 }
 
 /**
- * Error thrown when a model load is aborted via `FragmentsModels.abort()`.
+ * Error thrown when a model load is aborted via `FragmentsModels.abort()`,
+ * the `signal` passed to `FragmentsModels.load()`, or by disposing the model
+ * while it loads.
  */
 export class LoadAbortedError extends Error {
   constructor(modelId: string) {
