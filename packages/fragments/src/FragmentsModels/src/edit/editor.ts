@@ -76,6 +76,23 @@ export class Editor {
   }
 
   /**
+   * Gets the requests of the specified Fragments model added since an earlier call.
+   * @remarks Reading only what was added keeps a long unsaved session cheap to follow:
+   * every request is copied from the worker once. Pass the `count` and `generation` of the
+   * previous result. If requests were undone, selected, set or reset since, all of them are
+   * returned and `from` is 0. The same happens after `save`, or after the model is disposed
+   * and loaded again with the same ID: the log starts again (`save` leaves it empty) under a
+   * new `generation`, so check `from` before appending to what was read earlier.
+   * @param modelId - The ID of the model to get the requests from.
+   * @param from - The `count` of the previous result (0 the first time).
+   * @param generation - The `generation` of the previous result (-1 the first time).
+   * @returns The requests from `from` on, the request count and the generation of the log.
+   */
+  async getModelRequestsSince(modelId: string, from = 0, generation = -1) {
+    return this._editHelper.getRequestsSince(modelId, from, generation);
+  }
+
+  /**
    * Selects an edit request of the specified Fragments model to set the model in the state it
    * was after the request was applied.
    * @param modelId - The ID of the model to select the request from.

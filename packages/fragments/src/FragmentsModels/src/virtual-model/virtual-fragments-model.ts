@@ -42,7 +42,12 @@ import { VirtualBoxController } from "../bounding-boxes";
 import { Model } from "../../../Schema";
 import { Connection } from "../multithreading/connection";
 
-import { EditRequest, EditRequestType, EditUtils } from "../../../Utils";
+import {
+  EditRequest,
+  EditRequestsSince,
+  EditRequestType,
+  EditUtils,
+} from "../../../Utils";
 import { GridsController } from "./virtual-controllers/grids-controller";
 import {
   CoordinatesHelper,
@@ -92,6 +97,11 @@ export class VirtualFragmentsModel {
   private _nextId = 0;
 
   private _requestsForRedo: EditRequest[] = [];
+
+  // Changes whenever `requests` changes other than by appending (see getRequestsSince).
+  // Starts at a random 32-bit integer, not 0, so a generation read before a save or reload
+  // does not match the model loaded under the same id (a counter would repeat across workers).
+  private _requestsGeneration = Math.floor(Math.random() * 0x100000000);
 
   constructor(
     modelId: string,
@@ -606,6 +616,9 @@ export class VirtualFragmentsModel {
   }
 
   edit(requests: EditRequest[], raw = true) {
+    // Replayed requests (e.g. from getRequests() of another load of the file)
+    // carry their local ids: new ids start after them.
+    this.startIdsAfter(requests);
     const ids = EditUtils.solveIds(requests, this._nextId);
     this._nextId += ids.length;
     for (const request of requests) {
@@ -627,6 +640,7 @@ export class VirtualFragmentsModel {
   reset() {
     this.requests = [];
     this._requestsForRedo = [];
+    this._requestsGeneration++;
     this._requestIndex.rebuild(this.requests);
     this._nextId = this.getMaxLocalId();
   }
@@ -655,6 +669,7 @@ export class VirtualFragmentsModel {
     }
     this._requestIndex.pop(lastRequest);
     this._requestsForRedo.unshift(lastRequest);
+    this._requestsGeneration++;
   }
 
   redo() {
@@ -676,16 +691,50 @@ export class VirtualFragmentsModel {
     };
   }
 
+  /**
+   * The requests added since an earlier call, or all of them if the log changed otherwise.
+   * @param from - The `count` the earlier call returned.
+   * @param generation - The `generation` the earlier call returned.
+   */
+  getRequestsSince(from: number, generation: number): EditRequestsSince {
+    const kept =
+      generation === this._requestsGeneration &&
+      Number.isInteger(from) &&
+      from >= 0 &&
+      from <= this.requests.length;
+    const start = kept ? from : 0;
+    return {
+      generation: this._requestsGeneration,
+      from: start,
+      count: this.requests.length,
+      requests: this.requests.slice(start),
+    };
+  }
+
   setRequests(data: {
     requests?: EditRequest[];
     undoneRequests?: EditRequest[];
   }) {
+    // Restored requests carry their local ids, and the undone ones can be
+    // redone: new ids start after all of them.
     if (data.requests) {
       this.requests = data.requests;
       this._requestIndex.rebuild(this.requests);
+      this._requestsGeneration++;
+      this.startIdsAfter(this.requests);
     }
     if (data.undoneRequests) {
       this._requestsForRedo = data.undoneRequests;
+      this.startIdsAfter(this._requestsForRedo);
+    }
+  }
+
+  private startIdsAfter(requests: EditRequest[]) {
+    for (const request of requests) {
+      const localId = (request as { localId?: unknown }).localId;
+      if (Number.isInteger(localId)) {
+        this._nextId = Math.max(this._nextId, (localId as number) + 1);
+      }
     }
   }
 
@@ -700,6 +749,7 @@ export class VirtualFragmentsModel {
 
     this.requests = [];
     this._requestsForRedo = [];
+    this._requestsGeneration++;
 
     for (let i = 0; i < allRequests.length; i++) {
       if (i <= index) {

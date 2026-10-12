@@ -2,11 +2,18 @@
 
 ## Unreleased
 
+### Features
+
+* `editor.getModelRequestsSince(modelId, from, generation)` returns only the requests added since an earlier call, so following the edit log of a long unsaved session no longer copies the whole log out of the worker on every read. If requests were undone, selected, set or reset in between, or the model was saved or loaded again, it returns all of them.
+
 ### Bug Fixes
 
 * `setSample()` passed `high === 0` (a highlight-derived value, true for almost every non-highlighted sample) as the `visible` argument to `updateTile()`, instead of the method's own `vis` parameter (the real value `VisibilityHelper.setVisible()`/`toggleVisible()` compute from `model.itemConfig`). On models where the affected samples' LOD state doesn't otherwise change on the same tick, this means a `setVisible()`/`toggleVisible()` call updates the model's own visibility state (`getVisible()` reflects it correctly) without ever updating the corresponding tile's rendered geometry - most reliably observed on large (10k+ item) models, where the correct LOD-driven `updateVisible()` path is less frequently re-entered for the same samples than on small models.
 * Reuse identical preserved highlight materials across items and repeated updates, while keeping depth, transparency and inheritance settings distinct.
 * Settle forced updates when the scene is empty or the last model is removed, without waiting for a worker FINISH that can no longer arrive.
+* Save an item created since the last save with its latest `UPDATE_ITEM`, as reads of the pending edits already return it, instead of its creation attributes.
+* Edits replayed with their local ids (e.g. the requests of `editor.getModelRequests()` applied to another load of the file) now advance the id allocator, so later created items no longer reuse a replayed id and `save()` keeps the max local id above them.
+* Requests restored with `setRequests()` (a stored session, or the undone requests kept across `editor.save()`) now advance the id allocator too, so later created items no longer reuse a restored id.
 
 ### ⚠ BREAKING CHANGES
 
